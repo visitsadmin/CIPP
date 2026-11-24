@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from "react";
-
+import React, { useEffect, useMemo, useState } from "react";
+import { CippIcons } from "../../utils/icon-registry";
 import {
   Box,
   Button,
   Alert,
+  Chip,
   Typography,
   Accordion,
   AccordionSummary,
@@ -11,19 +12,30 @@ import {
   Stack,
   SvgIcon,
   Skeleton,
+  ToggleButton,
+  ToggleButtonGroup,
 } from "@mui/material";
-
 import { Grid } from "@mui/system";
 import { ApiGetCall, ApiGetCallWithPagination, ApiPostCall } from "../../api/ApiCall";
-import { CippOffCanvas } from "/src/components/CippComponents/CippOffCanvas";
-import { CippFormTenantSelector } from "/src/components/CippComponents/CippFormTenantSelector";
-import { Save, Warning, WarningOutlined } from "@mui/icons-material";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import { CippOffCanvas } from "../CippComponents/CippOffCanvas";
+import { CippFormTenantSelector } from "../CippComponents/CippFormTenantSelector";
 import CippFormComponent from "../CippComponents/CippFormComponent";
 import { useForm, useFormState, useWatch } from "react-hook-form";
-import { InformationCircleIcon } from "@heroicons/react/24/outline";
 import { CippApiResults } from "../CippComponents/CippApiResults";
 import cippRoles from "../../data/cipp-roles.json";
+import { GroupHeader, GroupItems } from "../CippComponents/CippAutocompleteGrouping";
+import {
+  matchPattern,
+  flattenPermissionTree,
+  expandRules,
+  rulesToFlatMap,
+  flatMapToRules,
+  validateRulePattern,
+  buildRuleSuggestions,
+} from "../../utils/permission-rules";
+
+// Stable reference so the ApiGetCall default doesn't retrigger effects every render.
+const EMPTY_PERMISSIONS = [];
 
 export const CippRoleAddEdit = ({ selectedRole }) => {
   const updatePermissions = ApiPostCall({
@@ -31,20 +43,52 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
     relatedQueryKeys: ["customRoleList", "customRoleTable"],
   });
 
+  const featureFlags = ApiGetCall({
+    url: "/api/ListFeatureFlags",
+    queryKey: "featureFlags",
+    staleTime: 600000,
+  });
+  const tenantGroupSelectorEnabled =
+    Array.isArray(featureFlags.data) &&
+    featureFlags.data.some((flag) => flag.Id === "TenantGroupSelector" && flag.Enabled);
+
   const [allTenantSelected, setAllTenantSelected] = useState(false);
   const [cippApiRoleSelected, setCippApiRoleSelected] = useState(false);
   const [selectedRoleState, setSelectedRoleState] = useState(null);
-  const [updateDefaults, setUpdateDefaults] = useState(false);
   const [baseRolePermissions, setBaseRolePermissions] = useState({});
   const [isBaseRole, setIsBaseRole] = useState(false);
+  // New roles start in simple (pattern) mode; existing roles pick their mode in the
+  // reset effect based on whether their stored rules contain wildcards.
+  const [permissionMode, setPermissionMode] = useState(selectedRole ? "advanced" : "simple");
+  const [gridDiverged, setGridDiverged] = useState(false);
+  const [rulePreviewVisible, setRulePreviewVisible] = useState(false);
 
   const formControl = useForm({
     mode: "onChange",
+    defaultValues: {
+      allowedTenants: [],
+      blockedTenants: [],
+      BlockedEndpoints: [],
+      BlockAllTenants: false,
+      BlockTenantGroups: false,
+      IPRange: [],
+      AppRoleTenants: [],
+      Permissions: {},
+      AllowedRolesTemplate: null,
+      PermissionRulesInclude: [],
+      PermissionRulesExclude: [],
+    },
   });
 
   const formState = useFormState({ control: formControl.control });
 
   const validateRoleName = (value) => {
+    const alphaNumRegex = /^[A-Za-z0-9]+$/;
+
+    if (!alphaNumRegex.test(value)) {
+      return "Role name must contain only letters and numbers, no spaces or special characters";
+    }
+
     if (
       customRoleList?.pages?.[0]?.some(
         (role) => role?.RowKey?.toLowerCase() === value?.toLowerCase()
@@ -57,12 +101,33 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
 
   const selectedTenant = useWatch({ control: formControl.control, name: "allowedTenants" });
   const blockedTenants = useWatch({ control: formControl.control, name: "blockedTenants" });
+  const blockedEndpoints = useWatch({ control: formControl.control, name: "BlockedEndpoints" });
   const setDefaults = useWatch({ control: formControl.control, name: "Defaults" });
   const selectedPermissions = useWatch({ control: formControl.control, name: "Permissions" });
   const selectedEntraGroup = useWatch({ control: formControl.control, name: "EntraGroup" });
+  const selectedRolesTemplate = useWatch({
+    control: formControl.control,
+    name: "AllowedRolesTemplate",
+  });
+  const ipRanges = useWatch({ control: formControl.control, name: "IPRange" });
+  const appRoleTenants = useWatch({ control: formControl.control, name: "AppRoleTenants" });
+  const includeRules = useWatch({ control: formControl.control, name: "PermissionRulesInclude" });
+  const excludeRules = useWatch({ control: formControl.control, name: "PermissionRulesExclude" });
+  const baseRoleTemplate = useWatch({ control: formControl.control, name: "BaseRoleTemplate" });
+
+  // "Start from a built-in role": copy its patterns into the rule fields as an
+  // editable starting point, then clear the picker so it acts as a one-shot action.
+  useEffect(() => {
+    const roleName = baseRoleTemplate?.value;
+    if (!roleName || !cippRoles[roleName]) return;
+    const toOptions = (list) => (list || []).map((pattern) => ({ label: pattern, value: pattern }));
+    formControl.setValue("PermissionRulesInclude", toOptions(cippRoles[roleName].include));
+    formControl.setValue("PermissionRulesExclude", toOptions(cippRoles[roleName].exclude));
+    formControl.setValue("BaseRoleTemplate", null);
+  }, [baseRoleTemplate]);
 
   const {
-    data: apiPermissions = [],
+    data: apiPermissions = EMPTY_PERMISSIONS,
     isFetching: apiPermissionFetching,
     isSuccess: apiPermissionSuccess,
   } = ApiGetCall({
@@ -79,15 +144,66 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
     queryKey: "customRoleList",
   });
 
-  const { data: { pages = [] } = {}, isSuccess: tenantsSuccess } = ApiGetCallWithPagination({
+  const {
+    data: { pages = [] } = {},
+    isSuccess: tenantsSuccess,
+    isFetching: tenantsFetching,
+  } = ApiGetCallWithPagination({
     url: "/api/ListTenants?AllTenantSelector=true",
-    queryKey: "ListTenants-AllTenantSelector",
+    queryKey: "ListTenants-All",
   });
   const tenants = pages[0] || [];
 
-  const matchPattern = (pattern, value) => {
-    const regex = new RegExp(`^${pattern.replace("*", ".*")}$`);
-    return regex.test(value);
+  const permissionUniverse = useMemo(() => flattenPermissionTree(apiPermissions), [apiPermissions]);
+  const ruleSuggestions = useMemo(() => buildRuleSuggestions(apiPermissions), [apiPermissions]);
+  const currentRules = useMemo(
+    () => ({
+      Include: (includeRules || []).map((o) => o?.value || o).filter(Boolean),
+      Exclude: (excludeRules || []).map((o) => o?.value || o).filter(Boolean),
+    }),
+    [includeRules, excludeRules]
+  );
+  const ruleExpansion = useMemo(
+    () => expandRules(currentRules, permissionUniverse),
+    [currentRules, permissionUniverse]
+  );
+  // Login breaks without CIPP.Core.Read; save auto-adds it when rules miss it.
+  const coreCovered = ruleExpansion.matched.some((p) => p.startsWith("CIPP.Core."));
+
+  const handleModeChange = (_event, newMode) => {
+    if (!newMode || newMode === permissionMode) return;
+    if (newMode === "advanced") {
+      // Expand rules into the grid so the advanced view reflects the same role.
+      if (currentRules.Include.length > 0) {
+        formControl.setValue("Permissions", rulesToFlatMap(currentRules, apiPermissions));
+      }
+      setGridDiverged(false);
+    } else {
+      const rulesGrid = rulesToFlatMap(currentRules, apiPermissions);
+      const diverged =
+        currentRules.Include.length > 0 &&
+        Object.keys(rulesGrid).some((key) => (selectedPermissions?.[key] ?? null) !== rulesGrid[key]);
+      setGridDiverged(diverged);
+    }
+    setPermissionMode(newMode);
+  };
+
+  const getFunctionDescriptionText = (description) => {
+    if (!description) return null;
+
+    if (Array.isArray(description)) {
+      return description?.[0]?.Text || description?.[0]?.text || null;
+    }
+
+    if (typeof description === "string") {
+      return description;
+    }
+
+    if (typeof description === "object") {
+      return description?.Text || description?.text || null;
+    }
+
+    return null;
   };
 
   const getBaseRolePermissions = (role) => {
@@ -125,10 +241,15 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
 
   useEffect(() => {
     if (selectedRole && cippRoles[selectedRole]) {
-      setBaseRolePermissions(getBaseRolePermissions(selectedRole));
+      // Skip the setState when both the old and new value are empty (e.g. apiPermissions
+      // still pending) so this doesn't create a fresh {} reference on every render.
+      setBaseRolePermissions((prev) => {
+        const next = getBaseRolePermissions(selectedRole);
+        return Object.keys(prev).length === 0 && Object.keys(next).length === 0 ? prev : next;
+      });
       setIsBaseRole(true);
     } else {
-      setBaseRolePermissions({});
+      setBaseRolePermissions((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       setIsBaseRole(false);
     }
   }, [selectedRole, apiPermissions]);
@@ -137,9 +258,12 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
     if (
       (customRoleListSuccess &&
         tenantsSuccess &&
+        // The grid is built from the permission list; loading before it arrives yields {}.
+        apiPermissionSuccess &&
         selectedRole &&
         selectedRoleState !== selectedRole) ||
-      baseRolePermissions
+      // An empty {} isn't a real change — only a populated baseRolePermissions should retrigger this.
+      Object.keys(baseRolePermissions).length > 0
     ) {
       setSelectedRoleState(selectedRole);
       const isApiRole = selectedRole === "api-role";
@@ -149,27 +273,61 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
         (role) => role.RowKey === selectedRole
       );
 
+      // Process allowed tenants - handle both groups and tenant IDs
       var newAllowedTenants = [];
-      currentPermissions?.AllowedTenants.map((tenant) => {
-        var tenantInfo = tenants.find((t) => t.customerId === tenant);
-        var label = `${tenantInfo?.displayName} (${tenantInfo?.defaultDomainName})`;
-        if (tenantInfo?.displayName) {
+      currentPermissions?.AllowedTenants?.forEach((item) => {
+        if (typeof item === "object" && item.type === "Group") {
+          // Handle group objects
           newAllowedTenants.push({
-            label: label,
-            value: tenantInfo.defaultDomainName,
+            label: item.label,
+            value: item.value,
+            type: "Group",
           });
+        } else {
+          // Handle tenant customer IDs (legacy format)
+          var tenantInfo = tenants.find((t) => t?.customerId === item);
+          if (tenantInfo?.displayName) {
+            var label = `${tenantInfo.displayName} (${tenantInfo.defaultDomainName})`;
+            newAllowedTenants.push({
+              label: label,
+              value: tenantInfo.defaultDomainName,
+              type: "Tenant",
+              addedFields: {
+                defaultDomainName: tenantInfo.defaultDomainName,
+                displayName: tenantInfo.displayName,
+                customerId: tenantInfo.customerId,
+              },
+            });
+          }
         }
       });
 
+      // Process blocked tenants - handle both groups and tenant IDs
       var newBlockedTenants = [];
-      currentPermissions?.BlockedTenants.map((tenant) => {
-        var tenantInfo = tenants.find((t) => t.customerId === tenant);
-        var label = `${tenantInfo?.displayName} (${tenantInfo?.defaultDomainName})`;
-        if (tenantInfo?.displayName) {
+      currentPermissions?.BlockedTenants?.forEach((item) => {
+        if (typeof item === "object" && item.type === "Group") {
+          // Handle group objects
           newBlockedTenants.push({
-            label: label,
-            value: tenantInfo.defaultDomainName,
+            label: item.label,
+            value: item.value,
+            type: "Group",
           });
+        } else {
+          // Handle tenant customer IDs (legacy format)
+          var tenantInfo = tenants.find((t) => t?.customerId === item);
+          if (tenantInfo?.displayName) {
+            var label = `${tenantInfo.displayName} (${tenantInfo.defaultDomainName})`;
+            newBlockedTenants.push({
+              label: label,
+              value: tenantInfo.defaultDomainName,
+              type: "Tenant",
+              addedFields: {
+                defaultDomainName: tenantInfo.defaultDomainName,
+                displayName: tenantInfo.displayName,
+                customerId: tenantInfo.customerId,
+              },
+            });
+          }
         }
       });
 
@@ -185,11 +343,32 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
           Object.keys(apiPermissions[cat]).forEach((obj) => {
             const key = `${cat}${obj}`;
             const existingPerm = permissions?.[key];
-            processed[key] = existingPerm || `${cat}.${obj}.None`;
+            // Roles saved while the bug above was live hold ".undefined"; treat as None.
+            processed[key] = /\.(None|Read|ReadWrite)$/.test(existingPerm)
+              ? existingPerm
+              : `${cat}.${obj}.None`;
           });
         });
         return processed;
       };
+
+      // Process blocked endpoints
+      const processedBlockedEndpoints =
+        currentPermissions?.BlockedEndpoints?.map((endpoint) => ({
+          label: endpoint,
+          value: endpoint,
+        })) || [];
+
+      // Process IP ranges
+      const processedIPRanges =
+        currentPermissions?.IPRange?.map((ip) => ({
+          label: ip,
+          value: ip,
+        })) || [];
+
+      const storedRules = currentPermissions?.PermissionRules;
+      const toRuleOptions = (list) =>
+        Array.isArray(list) ? list.map((pattern) => ({ label: pattern, value: pattern })) : [];
 
       formControl.reset({
         Permissions:
@@ -199,14 +378,34 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
         RoleName: selectedRole ?? currentPermissions?.RowKey,
         allowedTenants: newAllowedTenants,
         blockedTenants: newBlockedTenants,
+        BlockedEndpoints: processedBlockedEndpoints,
+        BlockAllTenants: Boolean(currentPermissions?.BlockAllTenants),
+        BlockTenantGroups: Boolean(currentPermissions?.BlockTenantGroups),
+        IPRange: processedIPRanges,
+        AppRoleTenants:
+          currentPermissions?.AppRoleTenants?.map((tenantId) => ({
+            label: tenantId,
+            value: tenantId,
+          })) || [],
         EntraGroup: currentPermissions?.EntraGroup,
+        AllowedRolesTemplate: currentPermissions?.AllowedRolesTemplate || null,
+        PermissionRulesInclude: toRuleOptions(storedRules?.Include),
+        PermissionRulesExclude: toRuleOptions(storedRules?.Exclude),
       });
+      if (currentPermissions) {
+        // Wildcard roles open in simple mode; migrated concrete-string roles open in
+        // the grid, which is the friendlier view of an explicit list.
+        const hasWildcards = storedRules?.Include?.some((pattern) => pattern.includes("*"));
+        setPermissionMode(hasWildcards ? "simple" : "advanced");
+        setGridDiverged(false);
+      }
     }
-  }, [customRoleList, customRoleListSuccess, tenantsSuccess, baseRolePermissions]);
+  }, [customRoleList, customRoleListSuccess, tenantsSuccess, apiPermissionSuccess, baseRolePermissions]);
 
   useEffect(() => {
-    if (updateDefaults !== setDefaults) {
-      setUpdateDefaults(setDefaults);
+    // Only a real "Set All" selection applies; the watched field is undefined on mount
+    // and after reset(), and applying that wrote "Cat.Obj.undefined" for every row.
+    if (setDefaults) {
       var newPermissions = {};
       Object.keys(apiPermissions).forEach((cat) => {
         Object.keys(apiPermissions[cat]).forEach((obj) => {
@@ -221,7 +420,7 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
       });
       formControl.setValue("Permissions", newPermissions);
     }
-  }, [setDefaults, updateDefaults]);
+  }, [setDefaults]);
 
   useEffect(() => {
     var alltenant = false;
@@ -245,58 +444,118 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
 
   const handleSubmit = () => {
     let values = formControl.getValues();
-    var allowedTenantIds = [];
 
-    selectedTenant.map((tenant) => {
-      var tenant = tenants.find((t) => t.defaultDomainName === tenant?.value);
-      if (tenant?.customerId) {
-        allowedTenantIds.push(tenant.customerId);
-      }
-    });
+    // Process allowed tenants - preserve groups and convert tenants to IDs
+    const processedAllowedTenants =
+      selectedTenant
+        ?.map((tenant) => {
+          if (tenant.type === "Group") {
+            // Keep groups as-is for backend processing
+            return {
+              type: "Group",
+              value: tenant.value,
+              label: tenant.label,
+            };
+          } else {
+            // Convert tenant domain names to customer IDs
+            const tenantInfo = tenants.find((t) => t.defaultDomainName === tenant.value);
+            return tenantInfo?.customerId;
+          }
+        })
+        .filter(Boolean) || [];
 
-    var blockedTenantIds = [];
-    blockedTenants.map((tenant) => {
-      var tenant = tenants.find((t) => t.defaultDomainName === tenant?.value);
-      if (tenant?.customerId) {
-        blockedTenantIds.push(tenant.customerId);
-      }
-    });
+    // Process blocked tenants - preserve groups and convert tenants to IDs
+    const processedBlockedTenants =
+      blockedTenants
+        ?.map((tenant) => {
+          if (tenant.type === "Group") {
+            // Keep groups as-is for backend processing
+            return {
+              type: "Group",
+              value: tenant.value,
+              label: tenant.label,
+            };
+          } else {
+            // Convert tenant domain names to customer IDs
+            const tenantInfo = tenants.find((t) => t.defaultDomainName === tenant.value);
+            return tenantInfo?.customerId;
+          }
+        })
+        .filter(Boolean) || [];
+
+    const processedBlockedEndpoints =
+      values?.["BlockedEndpoints"]?.map((endpoint) => {
+        // Extract the endpoint value
+        return endpoint.value || endpoint;
+      }) || [];
+
+    const processedIPRanges =
+      ipRanges?.map((ip) => {
+        return ip?.value || ip;
+      }) || [];
+
+    // PermissionRules is the canonical format for both modes: simple mode sends the
+    // authored patterns, advanced mode sends concrete strings derived from the grid.
+    // Permissions stays as a flat snapshot for older backends.
+    const activeRules =
+      permissionMode === "simple"
+        ? {
+            Include:
+              coreCovered || currentRules.Include.length === 0
+                ? currentRules.Include
+                : [...currentRules.Include, "CIPP.Core.Read"],
+            Exclude: currentRules.Exclude,
+          }
+        : flatMapToRules(selectedPermissions);
+    const snapshotPermissions =
+      permissionMode === "simple" ? rulesToFlatMap(activeRules, apiPermissions) : selectedPermissions;
 
     updatePermissions.mutate({
       url: "/api/ExecCustomRole?Action=AddUpdate",
       data: {
         RoleName: values?.["RoleName"],
-        Permissions: selectedPermissions,
+        Permissions: snapshotPermissions,
+        PermissionRules: activeRules,
         EntraGroup: selectedEntraGroup,
-        AllowedTenants: allowedTenantIds,
-        BlockedTenants: blockedTenantIds,
+        AllowedTenants: processedAllowedTenants,
+        BlockedTenants: processedBlockedTenants,
+        BlockedEndpoints: processedBlockedEndpoints,
+        BlockAllTenants: Boolean(values?.["BlockAllTenants"]),
+        BlockTenantGroups: Boolean(values?.["BlockTenantGroups"]),
+        IPRange: processedIPRanges,
+        AppRoleTenants: values?.["AppRoleTenants"]?.map((tenant) => tenant?.value || tenant) || [],
+        AllowedRolesTemplate: selectedRolesTemplate || null,
       },
     });
   };
 
   const ApiPermissionRow = ({ obj, cat, readOnly }) => {
     const [offcanvasVisible, setOffcanvasVisible] = useState(false);
+    const [descriptionOffcanvasVisible, setDescriptionOffcanvasVisible] = useState(false);
+    const [selectedDescription, setSelectedDescription] = useState({ name: "", description: "" });
 
-    var items = [];
-    for (var key in apiPermissions[cat][obj])
-      for (var key2 in apiPermissions[cat][obj][key]) {
-        items.push({ heading: "", content: apiPermissions[cat][obj][key][key2] });
-      }
-    var group = [{ items: items }];
+    const handleDescriptionClick = (name, description) => {
+      setSelectedDescription({ name, description });
+      setDescriptionOffcanvasVisible(true);
+    };
 
     return (
       <Stack
-        direction="row"
-        display="flex"
-        alignItems="center"
-        justifyContent={"space-between"}
-        width={"100%"}
-      >
+        // The None/Read/ReadWrite radio row is wider than a phone leaves beside the object
+        // name, so the controls drop below it there.
+        direction={{ xs: "column", md: "row" }}
+        sx={{
+          alignItems: { xs: "flex-start", md: "center" },
+          justifyContent: "space-between",
+          width: "100%"
+        }}>
         <Typography variant="h6">{obj}</Typography>
-        <Stack direction="row" spacing={3} size={{ xl: 8 }}>
+        <Stack direction="row" spacing={3} sx={{
+          alignItems: "center"
+        }}>
           <Button onClick={() => setOffcanvasVisible(true)} size="sm" color="info">
             <SvgIcon fontSize="small">
-              <InformationCircleIcon />
+              <CippIcons.InformationCircleIcon />
             </SvgIcon>
           </Button>
           <CippFormComponent
@@ -319,41 +578,68 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
             disabled={readOnly}
           />
         </Stack>
+        {/* Main offcanvas */}
         <CippOffCanvas
           visible={offcanvasVisible}
-          onClose={() => {
-            setOffcanvasVisible(false);
-          }}
+          onClose={() => setOffcanvasVisible(false)}
+          title={`${cat}.${obj} Endpoints`}
         >
           <Stack spacing={2}>
-            <Typography variant="h3" sx={{ mx: 3 }}>
-              {`${cat}.${obj}`}
-            </Typography>
             <Typography variant="body1" sx={{ mx: 3 }}>
-              Listed below are the available API endpoints based on permission level, ReadWrite
+              Listed below are the available API endpoints based on permission level. ReadWrite
               level includes endpoints under Read.
             </Typography>
-            {[apiPermissions[cat][obj]].map((permissions, key) => {
-              var sections = Object.keys(permissions).map((type) => {
-                var items = [];
-                for (var api in permissions[type]) {
-                  items.push({ heading: "", content: permissions[type][api] });
-                }
-                return (
-                  <Stack key={key} spacing={2}>
-                    <Typography variant="h4">{type}</Typography>
-                    <Stack spacing={1}>
-                      {items.map((item, idx) => (
-                        <Stack key={idx} spacing={1}>
-                          <Typography variant="body2">{item.content}</Typography>
-                        </Stack>
-                      ))}
-                    </Stack>
+            {Object.keys(apiPermissions[cat][obj]).map((type, typeIndex) => {
+              var items = [];
+              for (var api in apiPermissions[cat][obj][type]) {
+                const apiFunction = apiPermissions[cat][obj][type][api];
+                items.push({
+                  name: apiFunction.Name,
+                  description: getFunctionDescriptionText(apiFunction.Description),
+                });
+              }
+              return (
+                <Stack key={`${type}-${typeIndex}`} spacing={2}>
+                  <Typography variant="h4">{type}</Typography>
+                  <Stack spacing={1}>
+                    {items.map((item, idx) => (
+                      <Stack key={`${type}-${idx}`} direction="row" spacing={1} sx={{
+                        alignItems: "center"
+                      }}>
+                        <Typography variant="body2" sx={{ fontWeight: "bold", flexGrow: 1 }}>
+                          {item.name}
+                        </Typography>
+                        {item.description && (
+                          <Button
+                            size="small"
+                            onClick={() => handleDescriptionClick(item.name, item.description)}
+                            sx={{ minWidth: "auto", p: 0.5 }}
+                          >
+                            <SvgIcon fontSize="small" color="info">
+                              <CippIcons.InformationCircleIcon />
+                            </SvgIcon>
+                          </Button>
+                        )}
+                      </Stack>
+                    ))}
                   </Stack>
-                );
-              });
-              return sections;
+                </Stack>
+              );
             })}
+          </Stack>
+        </CippOffCanvas>
+
+        {/* Description offcanvas */}
+        <CippOffCanvas
+          visible={descriptionOffcanvasVisible}
+          onClose={() => setDescriptionOffcanvasVisible(false)}
+          title="Function Description"
+        >
+          <Stack spacing={2} sx={{ p: 2 }}>
+            <Typography variant="h5" sx={{ fontWeight: "bold" }}>
+              {selectedDescription.name}
+            </Typography>
+            <Typography variant="body1">{selectedDescription.description}</Typography>
           </Stack>
         </CippOffCanvas>
       </Stack>
@@ -362,9 +648,15 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
 
   return (
     <>
-      <Stack spacing={3} direction="row">
-        <Box width={"80%"}>
+      {/* The summary pane rides beside the form only where there is room for both; below xl
+          it follows the form instead of squeezing it (the old 80%/30% flex split shrank both
+          panes at every width and pushed the summary off a phone screen entirely). */}
+      <Grid container spacing={3}>
+        <Grid size={{ xs: 12, xl: 9 }}>
           <Stack spacing={1} sx={{ mb: 3 }}>
+            <Typography variant="h5" sx={{ mb: 2 }}>
+              Role Options
+            </Typography>
             {!selectedRole && (
               <CippFormComponent
                 type="textField"
@@ -378,7 +670,7 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
               />
             )}
             {selectedRole && isBaseRole && ["admin", "superadmin"].includes(selectedRole) && (
-              <Alert color="warning" icon={<WarningOutlined />}>
+              <Alert color="warning" icon={<CippIcons.WarningOutlined />}>
                 This is a highly privileged role and overrides any custom role restrictions.
               </Alert>
             )}
@@ -402,12 +694,34 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
                 dataKey: "Results",
                 labelField: "displayName",
                 valueField: "id",
+                showRefresh: true,
               }}
               formControl={formControl}
               fullWidth={true}
               sortOptions={true}
               multiple={false}
               creatable={false}
+              helperText="Assigning an Entra group will automatically assign this role to all users in that group. This does not work with users invited directly to Static Web App."
+            />
+            <CippFormComponent
+              type="autoComplete"
+              name="AllowedRolesTemplate"
+              label="JIT Role Template"
+              placeholder="Select a JIT Role Template to restrict which roles this role can assign, leave blank for all roles."
+              api={{
+                url: "/api/ListJITRoleTemplates",
+                type: "GET",
+                queryKey: "ListJITRoleTemplates",
+                labelField: "templateName",
+                valueField: "GUID",
+                showRefresh: true,
+              }}
+              formControl={formControl}
+              fullWidth={true}
+              sortOptions={true}
+              multiple={false}
+              creatable={false}
+              helperText="Restricts which directory roles members of this role can grant via JIT Admin. Leave blank to allow all roles."
             />
           </Stack>
           {!isBaseRole && (
@@ -420,6 +734,8 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
                   allTenants={true}
                   name="allowedTenants"
                   fullWidth={true}
+                  includeGroups={true}
+                  helperText="Select the tenants that users should have access to with this role."
                 />
                 {allTenantSelected && blockedTenants?.length == 0 && (
                   <Alert color="warning">
@@ -437,75 +753,595 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
                     allTenants={false}
                     name="blockedTenants"
                     fullWidth={true}
+                    includeGroups={true}
+                    helperText="Select tenants that this role should not have access to."
                   />
                 </Box>
               )}
-            </>
-          )}
-          {apiPermissionFetching && <Skeleton variant="rectangle" height={500} />}
-          {apiPermissionSuccess && (
-            <>
-              <Typography variant="h5">API Permissions</Typography>
-              {!isBaseRole && (
-                <Stack
-                  direction="row"
-                  display="flex"
-                  alignItems="center"
-                  justifyContent={"space-between"}
-                  width={"100%"}
-                  sx={{ my: 2 }}
-                >
-                  <Typography variant="body2">Set All Permissions</Typography>
+              <Box sx={{ mb: 3 }}>
+                <CippFormComponent
+                  type="switch"
+                  name="BlockAllTenants"
+                  label="Block the All Tenants view"
+                  formControl={formControl}
+                  helperText="Members of this role cannot select All Tenants or run cross-tenant views. Another role without this setting still grants it."
+                />
+              </Box>
 
-                  <Box sx={{ pr: 5 }}>
-                    <CippFormComponent
-                      type="radio"
-                      name="Defaults"
-                      options={[
-                        {
-                          label: "None",
-                          value: "None",
-                        },
-                        { label: "Read", value: "Read" },
-                        {
-                          label: "Read / Write",
-                          value: "ReadWrite",
-                        },
-                      ]}
-                      formControl={formControl}
-                      row={true}
-                    />
-                  </Box>
-                </Stack>
-              )}
-              <Box>
-                <>
-                  {Object.keys(apiPermissions)
-                    .sort()
-                    .map((cat, catIndex) => (
-                      <Accordion variant="outlined" key={`accordion-item-${catIndex}`}>
-                        <AccordionSummary expandIcon={<ExpandMoreIcon />}>{cat}</AccordionSummary>
-                        <AccordionDetails>
-                          {Object.keys(apiPermissions[cat])
+              <Box sx={{ mb: 3 }}>
+                <CippFormComponent
+                  type="switch"
+                  name="BlockTenantGroups"
+                  label="Block tenant groups in the tenant selector"
+                  formControl={formControl}
+                  disabled={!tenantGroupSelectorEnabled}
+                  helperText={
+                    tenantGroupSelectorEnabled
+                      ? "Members of this role cannot pick a tenant group to view pages. They can still assign standards, alerts and other settings to groups. Another role without this setting still grants it."
+                      : "Tenant groups are not offered in the tenant selector. Turn on Tenant Groups in Tenant Selector under Application Settings > Features to use this setting."
+                  }
+                />
+              </Box>
+
+              <Box sx={{ mb: 3 }}>
+                <CippFormComponent
+                  type="autoComplete"
+                  name="BlockedEndpoints"
+                  label="Blocked Endpoints"
+                  placeholder="Select API endpoints to block for this role"
+                  options={
+                    apiPermissionSuccess
+                      ? (() => {
+                          const allEndpoints = [];
+                          Object.keys(apiPermissions)
                             .sort()
-                            .map((obj, index) => {
-                              const readOnly = baseRolePermissions?.[cat] ? true : false;
-                              return (
-                                <Grid container key={`row-${catIndex}-${index}`} className="mb-3">
-                                  <ApiPermissionRow obj={obj} cat={cat} readOnly={readOnly} />
-                                </Grid>
-                              );
-                            })}
-                        </AccordionDetails>
-                      </Accordion>
-                    ))}
-                </>
+                            .forEach((cat) => {
+                              Object.keys(apiPermissions[cat])
+                                .sort()
+                                .forEach((obj) => {
+                                  Object.keys(apiPermissions[cat][obj]).forEach((type) => {
+                                    Object.keys(apiPermissions[cat][obj][type]).forEach(
+                                      (apiKey) => {
+                                        const apiFunction = apiPermissions[cat][obj][type][apiKey];
+                                        const descriptionText = getFunctionDescriptionText(
+                                          apiFunction.Description
+                                        );
+                                        allEndpoints.push({
+                                          label: descriptionText
+                                            ? `${apiFunction.Name} - ${descriptionText}`
+                                            : apiFunction.Name,
+                                          value: apiFunction.Name,
+                                          category: `${cat}.${obj}.${type}`,
+                                        });
+                                      }
+                                    );
+                                  });
+                                });
+                            });
+                          // Sort endpoints alphabetically within each category
+                          return allEndpoints.sort((a, b) => {
+                            if (a.category !== b.category) {
+                              return a.category.localeCompare(b.category);
+                            }
+                            return a.label.localeCompare(b.label);
+                          });
+                        })()
+                      : []
+                  }
+                  formControl={formControl}
+                  fullWidth={true}
+                  multiple={true}
+                  creatable={false}
+                  groupBy={(option) => option.category}
+                  renderGroup={(params) => (
+                    <li key={params.key}>
+                      <GroupHeader>{params.group}</GroupHeader>
+                      <GroupItems>{params.children}</GroupItems>
+                    </li>
+                  )}
+                  helperText="Select specific API endpoints to block for this role, this overrides permission settings below."
+                />
               </Box>
             </>
           )}
-        </Box>
+          <Box sx={{ mb: 3 }}>
+            <CippFormComponent
+              type="autoComplete"
+              name="IPRange"
+              label="Allowed IP Range (Single hosts or CIDR notation)"
+              formControl={formControl}
+              multiple={true}
+              freeSolo={true}
+              creatable={true}
+              options={[]}
+              placeholder="Type in the IP addresses and hit enter"
+              helperText={
+                selectedRole === "superadmin"
+                  ? "IP restrictions are disabled for superadmin role to prevent lockout issues"
+                  : "Leave empty to allow all IP addresses. Supports IPv4/IPv6 in CIDR notation (e.g., 192.168.1.0/24, 2001:db8::/32)"
+              }
+              fullWidth={true}
+              disabled={selectedRole === "superadmin"}
+            />
+          </Box>
+          <Box sx={{ mb: 3 }}>
+            <CippFormComponent
+              type="autoComplete"
+              name="AppRoleTenants"
+              label="App Role Tenants (Entra tenant IDs)"
+              formControl={formControl}
+              multiple={true}
+              freeSolo={true}
+              creatable={true}
+              options={[]}
+              placeholder="Type a tenant ID and hit enter"
+              helperText="Users from these tenants who are assigned this role as an app role on the CIPP SSO enterprise app receive it at sign-in. Include your own tenant ID to use app roles there. Other tenants need the SSO app in multi-tenant mode and admin consent."
+              fullWidth={true}
+            />
+          </Box>
+          {apiPermissionFetching && (
+            <>
+              <Typography variant="h5">
+                <Skeleton width={150} />
+              </Typography>
+              <Stack
+                direction="row"
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  width: "100%",
+                  my: 2
+                }}>
+                <Skeleton width={180} />
+                <Box sx={{ pr: 5 }}>
+                  <Skeleton width={300} height={40} />
+                </Box>
+              </Stack>
+              {[...Array(5)].map((_, index) => (
+                <Accordion variant="outlined" key={`skeleton-accordion-${index}`} disabled>
+                  <AccordionSummary>
+                    <Skeleton width={100} />
+                  </AccordionSummary>
+                </Accordion>
+              ))}
+            </>
+          )}
+          {apiPermissionSuccess && (
+            <>
+              {/* Display include/exclude patterns for base roles */}
+              {isBaseRole && selectedRole && cippRoles[selectedRole]?.include && (
+                <>
+                  <Typography variant="h6" sx={{ mb: 2 }}>
+                    Defined Permissions
+                  </Typography>
+                  <Box sx={{ mb: 3 }}>
+                    <Typography
+                      variant="subtitle2"
+                      sx={{ mb: 1, fontWeight: "bold", color: "success.main" }}
+                    >
+                      Include Patterns:
+                    </Typography>
+                    <Typography variant="body2" sx={{ mb: 2 }}>
+                      These patterns define which permissions are included for this base role:
+                    </Typography>
+                    <Box sx={{ fontFamily: "monospace", fontSize: "0.875rem", mb: 2 }}>
+                      {cippRoles[selectedRole].include.map((pattern, idx) => (
+                        <Box
+                          key={idx}
+                          sx={{
+                            py: 0.5,
+                            px: 1,
+                            backgroundColor: "success.main",
+                            color: "success.contrastText",
+                            mb: 1,
+                            borderRadius: 1,
+                            opacity: 0.8,
+                            display: "inline-block",
+                            mr: 1,
+                          }}
+                        >
+                          {pattern}
+                        </Box>
+                      ))}
+                    </Box>
 
-        <Box size={{ md: 12, xl: 3 }} width="30%">
+                    {cippRoles[selectedRole]?.exclude &&
+                      cippRoles[selectedRole].exclude.length > 0 && (
+                        <>
+                          <Typography
+                            variant="subtitle2"
+                            sx={{ mb: 1, fontWeight: "bold", color: "error.main" }}
+                          >
+                            Exclude Patterns:
+                          </Typography>
+                          <Typography variant="body2" sx={{ mb: 2 }}>
+                            These patterns define which permissions are explicitly excluded from
+                            this base role:
+                          </Typography>
+                          <Box sx={{ fontFamily: "monospace", fontSize: "0.875rem" }}>
+                            {cippRoles[selectedRole].exclude.map((pattern, idx) => (
+                              <Box
+                                key={idx}
+                                sx={{
+                                  py: 0.5,
+                                  px: 1,
+                                  backgroundColor: "error.main",
+                                  color: "error.contrastText",
+                                  mb: 1,
+                                  borderRadius: 1,
+                                  opacity: 0.8,
+                                  display: "inline-block",
+                                  mr: 1,
+                                }}
+                              >
+                                {pattern}
+                              </Box>
+                            ))}
+                          </Box>
+                        </>
+                      )}
+                  </Box>
+                </>
+              )}
+
+              <Typography variant="h5" sx={{ mb: 2 }}>
+                API Permissions
+              </Typography>
+              {!isBaseRole && (
+                <ToggleButtonGroup
+                  exclusive
+                  value={permissionMode}
+                  onChange={handleModeChange}
+                  size="small"
+                  sx={{ mb: 2 }}
+                >
+                  <ToggleButton value="simple">Simple (patterns)</ToggleButton>
+                  <ToggleButton value="advanced">Advanced (per-category)</ToggleButton>
+                </ToggleButtonGroup>
+              )}
+              {!isBaseRole && permissionMode === "simple" && (
+                <Stack spacing={2} sx={{ mb: 3 }}>
+                  <Alert color="info">
+                    Simple mode works like CIPP's built-in roles: pick what to include, then carve
+                    out exclusions. Wildcards (*) match anything, so rules automatically cover new
+                    features added in future CIPP releases.
+                  </Alert>
+                  {gridDiverged && (
+                    <Alert color="warning">
+                      Changes made in Advanced mode are not reflected in these patterns. Saving in
+                      Simple mode will replace the role's permissions with the patterns below.
+                    </Alert>
+                  )}
+                  <CippFormComponent
+                    type="autoComplete"
+                    name="BaseRoleTemplate"
+                    label="Start from a built-in role (optional)"
+                    placeholder="Copy a built-in role's patterns as a starting point"
+                    options={Object.keys(cippRoles).map((role) => ({
+                      label: `${role} — include: ${cippRoles[role].include.join(", ") || "none"}${
+                        cippRoles[role].exclude.length
+                          ? `, exclude: ${cippRoles[role].exclude.join(", ")}`
+                          : ""
+                      }`,
+                      value: role,
+                    }))}
+                    formControl={formControl}
+                    fullWidth={true}
+                    multiple={false}
+                    creatable={false}
+                    helperText="Replaces the patterns below with the selected role's include/exclude rules — edit them freely afterwards."
+                  />
+                  <CippFormComponent
+                    type="autoComplete"
+                    name="PermissionRulesInclude"
+                    label="Include — grant access matching any of these"
+                    placeholder="Pick a pattern or type your own, e.g. Identity.User.*"
+                    options={ruleSuggestions}
+                    formControl={formControl}
+                    fullWidth={true}
+                    multiple={true}
+                    freeSolo={true}
+                    creatable={true}
+                    groupBy={(option) => option.category}
+                    renderGroup={(params) => (
+                      <li key={params.key}>
+                        <GroupHeader>{params.group}</GroupHeader>
+                        <GroupItems>{params.children}</GroupItems>
+                      </li>
+                    )}
+                    helperText="Patterns match Category.Object.Level permission names. * matches anything."
+                  />
+                  <CippFormComponent
+                    type="autoComplete"
+                    name="PermissionRulesExclude"
+                    label="Exclude — then deny anything matching these"
+                    placeholder="e.g. Tenant.Administration.*"
+                    options={ruleSuggestions}
+                    formControl={formControl}
+                    fullWidth={true}
+                    multiple={true}
+                    freeSolo={true}
+                    creatable={true}
+                    groupBy={(option) => option.category}
+                    renderGroup={(params) => (
+                      <li key={params.key}>
+                        <GroupHeader>{params.group}</GroupHeader>
+                        <GroupItems>{params.children}</GroupItems>
+                      </li>
+                    )}
+                    helperText="Exclusions always win over inclusions, exactly like built-in roles."
+                  />
+                  {[...currentRules.Include, ...currentRules.Exclude]
+                    .filter((pattern) => !validateRulePattern(pattern))
+                    .map((pattern) => (
+                      <Alert color="error" key={`invalid-${pattern}`}>
+                        "{pattern}" is not a valid pattern. Use up to three dot-separated segments
+                        of letters, numbers and *, e.g. Identity.User.Read or Exchange.*.
+                      </Alert>
+                    ))}
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                      Live result
+                    </Typography>
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      useFlexGap
+                      sx={{
+                        flexWrap: "wrap",
+                        mb: 1
+                      }}>
+                      {currentRules.Include.map((pattern) => (
+                        <Chip
+                          key={`inc-${pattern}`}
+                          size="small"
+                          label={`${pattern} — ${ruleExpansion.includeCounts[pattern] ?? 0} match${
+                            (ruleExpansion.includeCounts[pattern] ?? 0) === 1 ? "" : "es"
+                          }`}
+                          color={
+                            (ruleExpansion.includeCounts[pattern] ?? 0) > 0 ? "success" : "warning"
+                          }
+                          icon={
+                            (ruleExpansion.includeCounts[pattern] ?? 0) === 0 ? (
+                              <CippIcons.WarningOutlined />
+                            ) : undefined
+                          }
+                        />
+                      ))}
+                      {currentRules.Exclude.map((pattern) => (
+                        <Chip
+                          key={`exc-${pattern}`}
+                          size="small"
+                          label={`${pattern} — removes ${ruleExpansion.excludeCounts[pattern] ?? 0}`}
+                          color={
+                            (ruleExpansion.excludeCounts[pattern] ?? 0) > 0 ? "error" : "warning"
+                          }
+                          icon={
+                            (ruleExpansion.excludeCounts[pattern] ?? 0) === 0 ? (
+                              <CippIcons.WarningOutlined />
+                            ) : undefined
+                          }
+                        />
+                      ))}
+                    </Stack>
+                    {currentRules.Include.length === 0 ? (
+                      <Alert color="warning">
+                        Add at least one include pattern — a role with no inclusions grants no
+                        access and cannot be saved.
+                      </Alert>
+                    ) : (
+                      <Stack direction="row" spacing={2} sx={{
+                        alignItems: "center"
+                      }}>
+                        <Typography variant="body2">
+                          <strong>{ruleExpansion.matched.length}</strong> of{" "}
+                          {permissionUniverse.length} permissions granted
+                        </Typography>
+                        <Button size="small" onClick={() => setRulePreviewVisible(true)}>
+                          Preview effective permissions
+                        </Button>
+                      </Stack>
+                    )}
+                    {currentRules.Include.length > 0 && !coreCovered && (
+                      <Alert color="info" sx={{ mt: 1 }}>
+                        CIPP.Core.Read is required to sign in and will be added automatically when
+                        you save.
+                      </Alert>
+                    )}
+                  </Box>
+                  <CippOffCanvas
+                    visible={rulePreviewVisible}
+                    onClose={() => setRulePreviewVisible(false)}
+                    title="Effective Permissions"
+                    size="lg"
+                  >
+                    <Stack spacing={1} sx={{ mx: 3 }}>
+                      <Typography variant="body2" sx={{ mb: 1 }}>
+                        Permissions granted by the current patterns — expand one to see the API
+                        endpoints it serves. Struck-through entries were matched by an include
+                        pattern but removed by an exclusion.
+                      </Typography>
+                      {ruleExpansion.matched.map((permission) => {
+                        const [permCat, permObj, permType] = permission.split(".");
+                        // A ReadWrite grant also serves the Read endpoints (enforcement
+                        // matches loosely), so show them unless Read is granted separately.
+                        const sections = [
+                          { type: permType, endpoints: apiPermissions?.[permCat]?.[permObj]?.[permType] },
+                        ];
+                        if (
+                          permType === "ReadWrite" &&
+                          apiPermissions?.[permCat]?.[permObj]?.Read &&
+                          !ruleExpansion.matched.includes(`${permCat}.${permObj}.Read`)
+                        ) {
+                          sections.push({
+                            type: "Read (included by ReadWrite)",
+                            endpoints: apiPermissions[permCat][permObj].Read,
+                          });
+                        }
+                        const endpointCount = sections.reduce(
+                          (total, section) => total + Object.keys(section.endpoints || {}).length,
+                          0
+                        );
+                        return (
+                          <Accordion variant="outlined" disableGutters key={permission}>
+                            <AccordionSummary
+                              expandIcon={<CippIcons.ExpandMore />}
+                              sx={{ "& .MuiAccordionSummary-content": { minWidth: 0 } }}
+                            >
+                              <Stack
+                                direction="row"
+                                spacing={1}
+                                useFlexGap
+                                sx={{
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                  minWidth: 0,
+                                  width: "100%"
+                                }}>
+                                <Typography
+                                  variant="body2"
+                                  sx={{
+                                    fontFamily: "monospace",
+                                    wordBreak: "break-all",
+                                    flexGrow: 1,
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  {permission}
+                                </Typography>
+                                <Chip
+                                  size="small"
+                                  label={`${endpointCount} endpoint${endpointCount === 1 ? "" : "s"}`}
+                                  sx={{ flexShrink: 0 }}
+                                />
+                              </Stack>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              <Stack spacing={1}>
+                                {sections.map((section) => (
+                                  <React.Fragment key={section.type}>
+                                    {sections.length > 1 && (
+                                      <Typography variant="subtitle2">{section.type}</Typography>
+                                    )}
+                                    {Object.keys(section.endpoints || {}).map((apiKey) => {
+                                      const apiFunction = section.endpoints[apiKey];
+                                      const description = getFunctionDescriptionText(
+                                        apiFunction.Description
+                                      );
+                                      return (
+                                        <Box key={apiKey}>
+                                          <Typography
+                                            variant="body2"
+                                            sx={{ fontWeight: "bold" }}
+                                          >
+                                            {apiFunction.Name}
+                                          </Typography>
+                                          {description && (
+                                            <Typography variant="caption" sx={{
+                                              color: "text.secondary"
+                                            }}>
+                                              {description}
+                                            </Typography>
+                                          )}
+                                        </Box>
+                                      );
+                                    })}
+                                  </React.Fragment>
+                                ))}
+                              </Stack>
+                            </AccordionDetails>
+                          </Accordion>
+                        );
+                      })}
+                      {Object.entries(ruleExpansion.excludedBy).map(([permission, pattern]) => (
+                        <Typography
+                          key={permission}
+                          variant="body2"
+                          sx={{
+                            fontFamily: "monospace",
+                            textDecoration: "line-through",
+                            color: "error.main",
+                          }}
+                        >
+                          {permission} (excluded by {pattern})
+                        </Typography>
+                      ))}
+                    </Stack>
+                  </CippOffCanvas>
+                </Stack>
+              )}
+              {(isBaseRole || permissionMode === "advanced") && (
+                <>
+                  {!isBaseRole && (
+                    <Stack
+                      direction="row"
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        width: "100%",
+                        mb: 2
+                      }}>
+                      <Typography variant="body2">Set All Permissions</Typography>
+
+                      <Box sx={{ pr: 5 }}>
+                        <CippFormComponent
+                          type="radio"
+                          name="Defaults"
+                          options={[
+                            {
+                              label: "None",
+                              value: "None",
+                            },
+                            { label: "Read", value: "Read" },
+                            {
+                              label: "Read / Write",
+                              value: "ReadWrite",
+                            },
+                          ]}
+                          formControl={formControl}
+                          row={true}
+                        />
+                      </Box>
+                    </Stack>
+                  )}
+                  <Box>
+                    <>
+                      {Object.keys(apiPermissions)
+                        .sort()
+                        .map((cat, catIndex) => (
+                          <Accordion variant="outlined" key={`accordion-item-${catIndex}`}>
+                            <AccordionSummary expandIcon={<CippIcons.ExpandMore />}>
+                              {cat}
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              {Object.keys(apiPermissions[cat])
+                                .sort()
+                                .map((obj, index) => {
+                                  const readOnly = baseRolePermissions?.[cat] ? true : false;
+                                  return (
+                                    <Grid
+                                      container
+                                      key={`row-${catIndex}-${index}`}
+                                      className="mb-3"
+                                    >
+                                      <ApiPermissionRow obj={obj} cat={cat} readOnly={readOnly} />
+                                    </Grid>
+                                  );
+                                })}
+                            </AccordionDetails>
+                          </Accordion>
+                        ))}
+                    </>
+                  </Box>
+                </>
+              )}
+            </>
+          )}
+        </Grid>
+
+        <Grid size={{ xs: 12, xl: 3 }}>
           {selectedEntraGroup && (
             <Alert color="info">
               This role will be assigned to the Entra Group:{" "}
@@ -517,7 +1353,7 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
               <h5>Allowed Tenants</h5>
               <ul>
                 {selectedTenant.map((tenant, idx) => (
-                  <li key={idx}>{tenant?.label}</li>
+                  <li key={`allowed-tenant-${idx}`}>{tenant?.label}</li>
                 ))}
               </ul>
             </>
@@ -527,12 +1363,67 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
               <h5>Blocked Tenants</h5>
               <ul>
                 {blockedTenants.map((tenant, idx) => (
-                  <li key={idx}>{tenant?.label}</li>
+                  <li key={`blocked-tenant-${idx}`}>{tenant?.label}</li>
                 ))}
               </ul>
             </>
           )}
-          {selectedPermissions && apiPermissionSuccess && (
+          {blockedEndpoints?.length > 0 && (
+            <>
+              <h5>Blocked Endpoints</h5>
+              <ul>
+                {blockedEndpoints.map((endpoint, idx) => (
+                  <li
+                    key={`blocked-endpoint-${idx}`}
+                    style={{ fontSize: "0.875rem", marginBottom: "0.25rem" }}
+                  >
+                    {endpoint?.label || endpoint?.value || endpoint}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {ipRanges?.length > 0 && (
+            <>
+              <h5>Allowed IP Ranges</h5>
+              <ul>
+                {ipRanges.map((ip, idx) => (
+                  <li key={`ip-range-${idx}`}>{ip?.value || ip?.label || ip}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {appRoleTenants?.length > 0 && (
+            <>
+              <h5>App Role Tenants</h5>
+              <ul>
+                {appRoleTenants.map((tenant, idx) => (
+                  <li key={`app-role-tenant-${idx}`}>{tenant?.value || tenant?.label || tenant}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {!isBaseRole && permissionMode === "simple" && currentRules.Include.length > 0 && (
+            <>
+              <h5>Permission Rules</h5>
+              <ul>
+                {currentRules.Include.map((pattern) => (
+                  <li key={`summary-inc-${pattern}`} style={{ fontFamily: "monospace" }}>
+                    + {pattern}
+                  </li>
+                ))}
+                {currentRules.Exclude.map((pattern) => (
+                  <li key={`summary-exc-${pattern}`} style={{ fontFamily: "monospace" }}>
+                    − {pattern}
+                  </li>
+                ))}
+              </ul>
+              <Typography variant="body2">
+                {ruleExpansion.matched.length} permissions granted
+              </Typography>
+            </>
+          )}
+          {(isBaseRole || permissionMode === "advanced") && selectedPermissions && apiPermissionSuccess && (
             <>
               <h5>Selected Permissions</h5>
               <ul>
@@ -540,30 +1431,44 @@ export const CippRoleAddEdit = ({ selectedRole }) => {
                   Object.keys(selectedPermissions)
                     ?.sort()
                     .map((cat, idx) => (
-                      <>
+                      <React.Fragment key={`permission-${idx}`}>
                         {selectedPermissions?.[cat] &&
                           typeof selectedPermissions[cat] === "string" &&
                           !selectedPermissions[cat]?.includes("None") && (
-                            <li key={idx}>{selectedPermissions[cat]}</li>
+                            <li>{selectedPermissions[cat]}</li>
                           )}
-                      </>
+                      </React.Fragment>
                     ))}
               </ul>
             </>
           )}
-        </Box>
-      </Stack>
+        </Grid>
+      </Grid>
 
       <CippApiResults apiObject={updatePermissions} />
-      <Stack direction="row" spacing={2} justifyContent="flex-end">
+      <Stack direction="row" spacing={2} sx={{
+        justifyContent: "flex-end"
+      }}>
         <Button
           className="me-2"
           type="submit"
           variant="contained"
-          disabled={updatePermissions.isPending || customRoleListFetching || !formState.isValid}
+          disabled={
+            updatePermissions.isPending ||
+            customRoleListFetching ||
+            apiPermissionFetching ||
+            tenantsFetching ||
+            !formState.isValid ||
+            (!isBaseRole &&
+              permissionMode === "simple" &&
+              (currentRules.Include.length === 0 ||
+                [...currentRules.Include, ...currentRules.Exclude].some(
+                  (pattern) => !validateRulePattern(pattern)
+                )))
+          }
           startIcon={
             <SvgIcon fontSize="small">
-              <Save />
+              <CippIcons.Save />
             </SvgIcon>
           }
           onClick={handleSubmit}

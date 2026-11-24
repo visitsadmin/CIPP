@@ -1,0 +1,12 @@
+[
+  {
+    "label": "Overview",
+    "path": "/endpoint/MEM/devices/device",
+    "icon": "Computer"
+  },
+  {
+    "label": "Remediations",
+    "path": "/endpoint/MEM/devices/device/remediations",
+    "icon": "Healing"
+  }
+]

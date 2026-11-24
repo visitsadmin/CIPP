@@ -1,13 +1,13 @@
-import { Button, Link, List, ListItem, Skeleton, SvgIcon, Typography } from "@mui/material";
-import { Cancel, CheckCircle } from "@mui/icons-material";
-import { CippPropertyList } from "/src/components/CippComponents/CippPropertyList";
-import { WrenchIcon, XMarkIcon } from "@heroicons/react/24/outline";
+import { Alert, Button, Link, List, ListItem, Skeleton, SvgIcon, Typography } from "@mui/material";
+import { CippIcons } from "../../utils/icon-registry";
+import { CippPropertyList } from "../CippComponents/CippPropertyList";
 import { CippOffCanvas } from "../CippComponents/CippOffCanvas";
 import { CippPropertyListCard } from "../CippCards/CippPropertyListCard";
-import { CippDataTable } from "/src/components/CippTable/CippDataTable";
+import { CippDataTable } from "../CippTable/CippDataTable";
 import { ApiPostCall } from "../../api/ApiCall";
 import { CippApiResults } from "../CippComponents/CippApiResults";
 import { useEffect, useState } from "react";
+import { CippCheckFatalAlert } from "./CippCheckFatalAlert";
 
 export const CippPermissionResults = (props) => {
   const {
@@ -17,6 +17,7 @@ export const CippPermissionResults = (props) => {
     setOffcanvasVisible,
     importReport,
     setCardIcon,
+    isPrimaryPartner,
   } = props;
   const [results, setResults] = useState({});
 
@@ -33,9 +34,11 @@ export const CippPermissionResults = (props) => {
       results?.Results?.MissingPermissions?.length > 0 ||
       results?.Results?.ErrorMessages?.length > 0
     ) {
-      setCardIcon(<Cancel />);
+      setCardIcon(<CippIcons.Cancel />);
+    } else if (results?.Results?.WarningMessages?.length > 0) {
+      setCardIcon(<CippIcons.Warning />);
     } else {
-      setCardIcon(<CheckCircle />);
+      setCardIcon(<CippIcons.CheckCircle />);
     }
   }, [results]);
 
@@ -68,6 +71,10 @@ export const CippPermissionResults = (props) => {
     });
   };
 
+  // The check never got a token - the detail fields would all be blank
+  const fatalError =
+    results?.Results?.ErrorMessages?.length > 0 && !results?.Results?.AccessTokenDetails?.Name;
+
   var propertyItems = [];
   accessTokenHeaders.forEach((header) => {
     propertyItems.push({
@@ -89,52 +96,104 @@ export const CippPermissionResults = (props) => {
 
   return (
     <>
-      {propertyItems.length > 0 && (
+      {propertyItems.length > 0 && !fatalError && (
         <CippPropertyList
-          isFetching={!importReport && executeCheck.isFetching}
+          isFetching={!importReport && executeCheck?.isFetching}
           propertyItems={propertyItems}
           layout="double"
           showDivider={false}
         />
       )}
-      {!importReport && executeCheck.isFetching ? (
-        <Skeleton variant="rectangular" height={100} sx={{ borderRadius: 1, ml: 3, mr: 1 }} />
+      {fatalError && results?.Results?.AccessTokenDetails?.AppId && (
+        <CippPropertyList
+          isFetching={!importReport && executeCheck?.isFetching}
+          propertyItems={[
+            {
+              label: "App Registration",
+              value: (
+                <Link
+                  href={`https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/Overview/appId/${results?.Results?.AccessTokenDetails?.AppId}`}
+                  target="_blank"
+                >
+                  {results?.Results?.AccessTokenDetails?.AppName ||
+                    results?.Results?.AccessTokenDetails?.AppId}
+                </Link>
+              ),
+            },
+          ]}
+          layout="single"
+          showDivider={false}
+        />
+      )}
+      {!importReport && executeCheck?.isFetching ? (
+        <List>
+          {[70, 85, 60, 75].map((width, index) => (
+            <ListItem key={index} sx={{ py: 0 }}>
+              <Typography variant="body2" sx={{ width: `${width}%` }}>
+                <Skeleton />
+              </Typography>
+            </ListItem>
+          ))}
+        </List>
+      ) : !importReport && executeCheck?.isError ? (
+        <Alert severity="error" sx={{ ml: 3, mr: 1 }}>
+          Failed to load permission check results. Please try refreshing or contact support if the
+          issue persists.
+        </Alert>
+      ) : fatalError ? (
+        <>
+          {results?.Results?.ErrorMessages?.map((error, index) => (
+            <CippCheckFatalAlert key={index} message={error} isPrimaryPartner={isPrimaryPartner} />
+          ))}
+        </>
       ) : (
         <>
           <List>
-            {results?.Results?.Messages.map((message, index) => (
+            {results?.Results?.Messages?.map((message, index) => (
               <ListItem key={index} sx={{ py: 0 }}>
                 <Typography variant="body2">
                   <SvgIcon fontSize="sm" style={{ marginRight: 4 }}>
-                    <CheckCircle />
+                    <CippIcons.CheckCircle />
                   </SvgIcon>
                   {message}
                 </Typography>
               </ListItem>
             ))}
-            {results?.Results?.ErrorMessages.map((error, index) => (
+            {results?.Results?.WarningMessages?.map((warning, index) => (
+              <ListItem key={`warning-${index}`} sx={{ py: 0 }}>
+                <Typography variant="body2">
+                  <SvgIcon fontSize="sm" color="warning" style={{ marginRight: 4 }}>
+                    <CippIcons.Warning />
+                  </SvgIcon>
+                  {warning}
+                </Typography>
+              </ListItem>
+            ))}
+            {results?.Results?.ErrorMessages?.map((error, index) => (
               <ListItem key={index} sx={{ py: 0 }}>
                 <Typography variant="body2">
                   <SvgIcon fontSize="sm" style={{ marginRight: 4 }}>
-                    <XMarkIcon />
+                    <CippIcons.XMarkIcon />
                   </SvgIcon>
                   {error}
                 </Typography>
               </ListItem>
             ))}
-            {results?.Results?.MissingPermissions.length > 0 && (
+            {results?.Results?.MissingPermissions?.length > 0 && (
               <ListItem sx={{ py: 0 }}>
                 <Typography variant="body2">
                   <SvgIcon fontSize="sm" style={{ marginRight: 4 }}>
-                    <XMarkIcon />
+                    <CippIcons.XMarkIcon />
                   </SvgIcon>
-                  There are new permissions to apply.
+                  There are new permissions to apply. Please click "Details" to review and apply the new permissions.
                 </Typography>
               </ListItem>
             )}
           </List>
 
-          <CippOffCanvas
+        </>
+      )}
+      <CippOffCanvas
             size="lg"
             title="Permission Details"
             visible={offcanvasVisible}
@@ -143,15 +202,12 @@ export const CippPermissionResults = (props) => {
             }}
             extendedInfo={[]}
           >
-            <Typography variant="h4" sx={{ mx: 3 }}>
-              Permission Details
-            </Typography>
-            {results?.Results?.Links.length > 0 && (
+            {results?.Results?.Links?.length > 0 && (
               <CippPropertyListCard
                 title="Documentation"
                 showDivider={false}
                 cardSx={{ p: 0, m: 0 }}
-                propertyItems={results?.Results?.Links.map((link) => {
+                propertyItems={results?.Results?.Links?.map((link) => {
                   return {
                     value: (
                       <Link href={link.Href} target="_blank">
@@ -164,11 +220,11 @@ export const CippPermissionResults = (props) => {
               />
             )}
             <CippApiResults apiObject={addMissingPermissions} />
-            {results?.Results?.MissingPermissions.length > 0 && (
+            {results?.Results?.MissingPermissions?.length > 0 && (
               <>
                 <CippDataTable
                   title="Missing Permissions"
-                  isFetching={!importReport && executeCheck.isFetching}
+                  isFetching={!importReport && executeCheck?.isFetching}
                   refreshFunction={executeCheck}
                   cardButton={
                     <Button
@@ -178,7 +234,7 @@ export const CippPermissionResults = (props) => {
                       onClick={handleAddMissingPermissions}
                       startIcon={
                         <SvgIcon fontSize="sm">
-                          <WrenchIcon />
+                          <CippIcons.WrenchIcon />
                         </SvgIcon>
                       }
                     >
@@ -189,6 +245,15 @@ export const CippPermissionResults = (props) => {
                   simpleColumns={["Application", "Type", "Permission"]}
                 />
               </>
+            )}
+            {results?.Results?.UngrantedPermissions?.length > 0 && (
+              <CippDataTable
+                title="Permissions not granted in your tenant"
+                isFetching={!importReport && executeCheck?.isFetching}
+                refreshFunction={executeCheck}
+                data={results?.Results?.UngrantedPermissions}
+                simpleColumns={["Type", "Permission"]}
+              />
             )}
             <CippApiResults apiObject={startCPVRefresh} />
             {results?.Results?.CPVRefreshList?.length > 0 && (
@@ -202,27 +267,27 @@ export const CippPermissionResults = (props) => {
                     onClick={handleStartCPVRefresh}
                     startIcon={
                       <SvgIcon fontSize="sm">
-                        <WrenchIcon />
+                        <CippIcons.WrenchIcon />
                       </SvgIcon>
                     }
                   >
                     Refresh CPV
                   </Button>
                 }
-                isFetching={!importReport && executeCheck.isFetching}
+                isFetching={!importReport && executeCheck?.isFetching}
                 refreshFunction={executeCheck}
                 data={results?.Results?.CPVRefreshList}
                 simpleColumns={["DisplayName", "DefaultDomainName", "LastRefresh"]}
               />
             )}
 
-            {results?.Results?.AccessTokenDetails?.Scope.length > 0 && (
+            {results?.Results?.AccessTokenDetails?.Scope?.length > 0 && (
               <>
                 <CippDataTable
                   title="Current Delegated Scopes"
-                  isFetching={!importReport && executeCheck.isFetching}
+                  isFetching={!importReport && executeCheck?.isFetching}
                   refreshFunction={executeCheck}
-                  data={results?.Results?.AccessTokenDetails?.Scope.map((scope) => {
+                  data={results?.Results?.AccessTokenDetails?.Scope?.map((scope) => {
                     return {
                       Scope: scope,
                     };
@@ -231,13 +296,13 @@ export const CippPermissionResults = (props) => {
                 />
               </>
             )}
-            {results?.Results?.ApplicationTokenDetails?.Roles.length > 0 && (
+            {results?.Results?.ApplicationTokenDetails?.Roles?.length > 0 && (
               <>
                 <CippDataTable
                   title="Current Application Roles"
-                  isFetching={!importReport && executeCheck.isFetching}
+                  isFetching={!importReport && executeCheck?.isFetching}
                   refreshFunction={executeCheck}
-                  data={results?.Results?.ApplicationTokenDetails?.Roles.map((role) => {
+                  data={results?.Results?.ApplicationTokenDetails?.Roles?.map((role) => {
                     return {
                       Role: role,
                     };
@@ -246,9 +311,7 @@ export const CippPermissionResults = (props) => {
                 />
               </>
             )}
-          </CippOffCanvas>
-        </>
-      )}
+      </CippOffCanvas>
     </>
   );
 };

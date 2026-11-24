@@ -13,11 +13,13 @@ export const CippFormCondition = (props) => {
     children,
     formControl,
     disabled = false,
+    clearOnHide = true, // New prop to control whether to clear values when hidden
+    clearFields, // Explicit field names to clear, for children that bind fields internally without a name prop
   } = props;
 
   if (
     field === undefined ||
-    compareValue === undefined ||
+    (compareValue === undefined && compareType !== "hasValue") ||
     children === undefined ||
     formControl === undefined
   ) {
@@ -45,7 +47,12 @@ export const CippFormCondition = (props) => {
 
   if (propertyName && propertyName !== "value") {
     watchedValue = get(watcher, propertyName);
-    compareTargetValue = get(compareValue, propertyName);
+    // Only extract from compareValue if it's an object, otherwise use as-is
+    if (typeof compareValue === "object" && compareValue !== null) {
+      compareTargetValue = get(compareValue, propertyName);
+    } else {
+      compareTargetValue = compareValue;
+    }
   }
 
   /*console.log("CippFormCondition: ", {
@@ -66,8 +73,9 @@ export const CippFormCondition = (props) => {
     React.Children.forEach(children, (child) => {
       if (!React.isValidElement(child)) return;
 
-      // Check if the child is a CippFormComponent with a name prop
-      if (child.props?.name && child.type?.name === "CippFormComponent") {
+      // A field is any child bound to the form. Not matched by component name: production
+      // minification empties it, and wrappers like CippFormGroupSelector never matched anyway.
+      if (child.props?.name && child.props?.formControl) {
         fieldNames.push(child.props.name);
       }
 
@@ -142,10 +150,17 @@ export const CippFormCondition = (props) => {
           watcher.length >= compareValue
         );
       case "hasValue":
-        return (
-          (watcher !== undefined && watcher !== null && watcher !== "") ||
-          (watcher?.value !== undefined && watcher?.value !== null && watcher?.value !== "")
-        );
+        // Check watchedValue (the extracted value based on propertyName)
+        // For simple values (strings, numbers)
+        if (watchedValue === undefined || watchedValue === null || watchedValue === "") {
+          return false;
+        }
+        // If it's an array, check if it has elements
+        if (Array.isArray(watchedValue)) {
+          return watchedValue.length > 0;
+        }
+        // For any other truthy value (objects, numbers, strings), consider it as having a value
+        return true;
       case "labelEq":
         return Array.isArray(watcher) && watcher.some((item) => item?.label === compareValue);
       case "labelContains":
@@ -156,9 +171,21 @@ export const CippFormCondition = (props) => {
           )
         );
       case "valueEq":
-        return Array.isArray(watcher) && watcher.some((item) => item?.value === compareValue);
+        if (Array.isArray(watcher)) {
+          return watcher.some((item) => item?.value === compareValue);
+        } else if (typeof watcher === "object" && watcher !== null) {
+          return watcher?.value === compareValue;
+        }
+        // Legacy templates can hold the raw value (e.g. a boolean saved by a former
+        // switch field) instead of an {label, value} option wrapper.
+        return watcher === compareValue;
       case "valueNotEq":
-        return Array.isArray(watcher) && watcher.some((item) => item?.value !== compareValue);
+        if (Array.isArray(watcher)) {
+          return watcher.some((item) => item?.value !== compareValue);
+        } else if (typeof watcher === "object" && watcher !== null) {
+          return watcher?.value !== compareValue;
+        }
+        return false;
       case "valueContains":
         return (
           Array.isArray(watcher) &&
@@ -166,6 +193,24 @@ export const CippFormCondition = (props) => {
             (item) => typeof item?.value === "string" && item.value.includes(compareValue)
           )
         );
+      case "isOneOf":
+        // Check if the watched value is one of the values in the compareValue array
+        if (!Array.isArray(compareValue)) {
+          console.warn(
+            "CippFormCondition: isOneOf compareType requires compareValue to be an array"
+          );
+          return false;
+        }
+        return compareValue.some((value) => isEqual(watchedValue, value));
+      case "isNotOneOf":
+        // Check if the watched value is NOT one of the values in the compareValue array
+        if (!Array.isArray(compareValue)) {
+          console.warn(
+            "CippFormCondition: isNotOneOf compareType requires compareValue to be an array"
+          );
+          return false;
+        }
+        return !compareValue.some((value) => isEqual(watchedValue, value));
       default:
         return false;
     }
@@ -173,8 +218,8 @@ export const CippFormCondition = (props) => {
 
   // Reset field values when condition is not met and action is "hide"
   useEffect(() => {
-    if (action === "hide" && !isConditionMet()) {
-      const fieldNames = extractFieldNames(children);
+    if (action === "hide" && !isConditionMet() && clearOnHide) {
+      const fieldNames = clearFields ?? extractFieldNames(children);
 
       // Reset each field
       fieldNames.forEach((fieldName) => {
@@ -187,7 +232,7 @@ export const CippFormCondition = (props) => {
         }
       });
     }
-  }, [watcher, action]);
+  }, [watcher, action, clearOnHide]);
 
   const disableChildren = (children) => {
     return React.Children.map(children, (child) => {

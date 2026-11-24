@@ -1,10 +1,5 @@
-import { Alert, Stack, Typography, Box } from "@mui/material";
-import { Grid } from "@mui/system";
-import CippFormComponent from "../CippComponents/CippFormComponent";
+import { Alert, Stack, Typography } from "@mui/material";
 import { CippWizardStepButtons } from "./CippWizardStepButtons";
-import { CippFormTenantSelector } from "../CippComponents/CippFormTenantSelector";
-import { CippFormCondition } from "../CippComponents/CippFormCondition";
-import alertList from "../../data/alerts.json";
 
 export const CippAlertsStep = (props) => {
   const { formControl, onPreviousStep, onNextStep, currentStep } = props;
@@ -13,6 +8,7 @@ export const CippAlertsStep = (props) => {
     { label: "Webhook", value: "Webhook" },
     { label: "Email", value: "Email" },
     { label: "PSA", value: "PSA" },
+    { label: "Push (notify me)", value: "Push" },
   ];
 
   const recurrenceOptions = [
@@ -21,6 +17,8 @@ export const CippAlertsStep = (props) => {
     { value: "4h", label: "Every 4 hours" },
     { value: "1d", label: "Every 1 day" },
     { value: "7d", label: "Every 7 days" },
+    { value: "14d", label: "Every 14 days" },
+    { value: "21d", label: "Every 21 days" },
     { value: "30d", label: "Every 30 days" },
     { value: "365d", label: "Every 365 days" },
   ];

@@ -2,10 +2,10 @@ import React, { useEffect } from "react";
 import { Divider } from "@mui/material";
 import { Grid } from "@mui/system";
 import { useForm, useWatch } from "react-hook-form";
-import { Layout as DashboardLayout } from "/src/layouts/index.js";
-import CippFormPage from "/src/components/CippFormPages/CippFormPage";
-import CippFormComponent from "/src/components/CippComponents/CippFormComponent";
-import { CippFormTenantSelector } from "/src/components/CippComponents/CippFormTenantSelector";
+import { Layout as DashboardLayout } from "../../../../layouts/index";
+import CippFormPage from "../../../../components/CippFormPages/CippFormPage";
+import CippFormComponent from "../../../../components/CippComponents/CippFormComponent";
+import { CippFormTenantSelector } from "../../../../components/CippComponents/CippFormTenantSelector";
 
 const AddPolicy = () => {
   const formControl = useForm({
@@ -29,18 +29,19 @@ const AddPolicy = () => {
     <CippFormPage
       formControl={formControl}
       queryKey="AddConnectionFilter"
-      title="Add Connection Filter"
+      title="Connection Filter"
       backButtonTitle="Connection Filter Overview"
       postUrl="/api/AddConnectionFilter"
     >
       <Grid container spacing={2}>
-        <Grid item size={{ xs: 12 }}>
+        <Grid size={{ xs: 12 }}>
           <CippFormTenantSelector
             label="Select Tenants"
             formControl={formControl}
             name="selectedTenants"
             type="multiple"
             allTenants={true}
+            preselectedEnabled={true}
             validators={{ required: "At least one tenant must be selected" }}
           />
         </Grid>
@@ -48,7 +49,7 @@ const AddPolicy = () => {
         <Divider sx={{ my: 2, width: "100%" }} />
 
         {/* TemplateList */}
-        <Grid item size={{ md: 12, xs: 12 }}>
+        <Grid size={{ md: 12, xs: 12 }}>
           <CippFormComponent
             type="autoComplete"
             label="Select a template (optional)"
@@ -67,7 +68,7 @@ const AddPolicy = () => {
 
         <Divider sx={{ my: 2, width: "100%" }} />
 
-        <Grid item size={{ xs: 12 }}>
+        <Grid size={{ xs: 12 }}>
           <CippFormComponent
             type="textField"
             label="Parameters (JSON)"
@@ -83,6 +84,6 @@ const AddPolicy = () => {
   );
 };
 
-AddPolicy.getLayout = (page) => <DashboardLayout>{page}</DashboardLayout>;
+AddPolicy.getLayout = (page) => <DashboardLayout usesTenant={false}>{page}</DashboardLayout>;
 
 export default AddPolicy;

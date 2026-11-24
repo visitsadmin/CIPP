@@ -12,6 +12,8 @@ export const CippTenantStep = (props) => {
     currentStep,
     onPreviousStep,
     preText,
+    includeTenantDefaults = false,
+    includeOffboardingDefaults = false,
   } = props;
 
   return (
@@ -23,6 +25,7 @@ export const CippTenantStep = (props) => {
         formControl={formControl}
         allTenants={allTenants}
         type={type}
+        includeTenantDefaults={includeTenantDefaults || includeOffboardingDefaults}
         preselectedEnabled={true}
       />
       <CippWizardStepButtons
